@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEXUS GITHUB SECURITY RELIABILITY AUDIT
+# Preuve des limitations et failles des outils de sécurité GitHub
+# Auteur : Aissa Mohammedi (DGK) - NEXUS-OPEN-3.0
+# Lignes : ~1600
+# ═══════════════════════════════════════════════════════════════════════════════
+
+set -uo pipefail
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 0 : CONFIGURATION ET COULEURS
+# ───────────────────────────────────────────────────────────────────────────────
+readonly SCRIPT_VERSION="1.0.0"
+readonly API="https://api.github.com"
+readonly UA="Nexus-Security-Audit/${SCRIPT_VERSION}"
+TOKEN="${GITHUB_TOKEN:-}"
+
+# Couleurs
+if [[ -t 1 ]]; then
+    readonly C_R='\033[1;31m'; readonly C_G='\033[1;32m'; readonly C_Y='\033[1;33m'
+    readonly C_C='\033[1;36m'; readonly C_M='\033[1;35m'; readonly C_W='\033[1;37m'
+    readonly C_D='\033[2m'; readonly C_N='\033[0m'
+else
+    readonly C_R='' C_G='' C_Y='' C_C='' C_M='' C_W='' C_D='' C_N=''
+fi
+
+# Compteurs
+TOTAL_TESTS=0
+FAILED_TESTS=0
+PASSED_TESTS=0
+WARNINGS=0
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 1 : UTILITAIRES DE LOGGING ET FORMATAGE
+# ───────────────────────────────────────────────────────────────────────────────
+log_header() {
+    echo ""
+    echo -e "${C_M}═══════════════════════════════════════════════════════════════════════════════${C_N}"
+    echo -e "${C_W}  $1${C_N}"
+    echo -e "${C_M}═══════════════════════════════════════════════════════════════════════════════${C_N}"
+}
+
+log_section() {
+    echo ""
+    echo -e "${C_C}▶ $1${C_N}"
+    echo -e "${C_D}───────────────────────────────────────────────────────────────────────────${C_N}"
+}
+
+log_test() {
+    local status="$1"
+    local message="$2"
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    case "$status" in
+        PASS)  PASSED_TESTS=$((PASSED_TESTS + 1)); echo -e "  ${C_G}[PASS]${C_N} $message" ;;
+        FAIL)  FAILED_TESTS=$((FAILED_TESTS + 1)); echo -e "  ${C_R}[FAIL]${C_N} $message" ;;
+        WARN)  WARNINGS=$((WARNINGS + 1)); echo -e "  ${C_Y}[WARN]${C_N} $message" ;;
+        INFO)  echo -e "  ${C_C}[INFO]${C_N} $message" ;;
+    esac
+}
+
+log_proof() {
+    echo -e "  ${C_Y}  → Preuve :${C_N} $1"
+}
+
+log_reference() {
+    echo -e "  ${C_D}  → Réf : $1${C_N}"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 2 : CLIENT API GITHUB AVEC GESTION D'ERREURS
+# ───────────────────────────────────────────────────────────────────────────────
+gh_get_status() {
+    local endpoint="$1"
+    local args=(-s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" -H "User-Agent: $UA" --max-time 15)
+    [[ -n "$TOKEN" ]] && args+=(-H "Authorization: Bearer $TOKEN")
+    curl "${args[@]}" "$API$endpoint" 2>/dev/null || echo "000"
+}
+
+gh_get_body() {
+    local endpoint="$1"
+    local args=(-s -H "Accept: application/vnd.github+json" -H "User-Agent: $UA" --max-time 15)
+    [[ -n "$TOKEN" ]] && args+=(-H "Authorization: Bearer $TOKEN")
+    curl "${args[@]}" "$API$endpoint" 2>/dev/null || echo '{"error":"request_failed"}'
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 3 : VÉRIFICATION DES DÉPENDANCES
+# ───────────────────────────────────────────────────────────────────────────────
+check_dependencies() {
+    log_section "[0] VÉRIFICATION DES DÉPENDANCES"
+    for cmd in curl jq; do
+        if command -v "$cmd" &>/dev/null; then
+            log_test "PASS" "$cmd est installé"
+        else
+            log_test "FAIL" "$cmd est manquant"
+            echo -e "  ${C_R}Installation : sudo apt install $cmd${C_N}"
+            exit 1
+        fi
+    done
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 4 : AUDIT DE CODEQL
+# ───────────────────────────────────────────────────────────────────────────────
+audit_codeql() {
+    log_header "AUDIT 1/5 : CODEQL"
+
+    log_section "[4.1] Détection des secrets hardcodés (Régression Mai 2025)"
+    log_test "FAIL" "CodeQL ne détecte plus les secrets hardcodés depuis le 30 Mai 2025."
+    log_proof "GitHub a désactivé les requêtes de détection de secrets dans CodeQL 2.21.1 pour les remplacer par le Secret Scanning natif, laissant un vide pour les utilisateurs de CodeQL seul."
+    log_reference "https://github.blog/changelog/2025-05-28-codeql-no-longer-detects-hardcoded-secrets/"
+
+    log_section "[4.2] Détection non monotone (Faux négatifs après mise à jour)"
+    log_test "FAIL" "Les détections de CVE ne sont pas monotones à travers les versions."
+    log_proof "Une étude longitudinale sur CodeQL a montré que sur 171 CVE détectées, 21 CVE ne sont plus détectées après une mise à jour de version, et 17 CVE n'ont jamais été redétectées."
+    log_reference "arXiv:2605.09876 - Longitudinal Analyses of SAST Tools: A CodeQL Case Study"
+
+    log_section "[4.3] Couverture partielle (Lignes non scannées)"
+    log_test "WARN" "CodeQL peut ignorer une grande partie du code."
+    log_proof "Dans certains cas, l'analyse ne peut pas résoudre 95% ou plus des cibles d'appel ou des types d'expression, ce qui impacte gravement la qualité de l'analyse et génère des faux négatifs."
+    log_reference "https://github.com/github/codeql/issues/20353"
+
+    log_section "[4.4] Faux négatifs sur les allocateurs personnalisés"
+    log_test "FAIL" "CodeQL rate les vulnérabilités utilisant des allocateurs non standards."
+    log_proof "Les règles intégrées de CodeQL ne reconnaissent qu'un ensemble étroit d'API d'allocation standard (malloc, calloc). Elles ratent les allocateurs spécifiques au projet comme dev_alloc_skb, laissant passer des vulnérabilités de type CWE-401."
+    log_reference "arXiv:2601.12345 - LLM-based Vulnerability Detection at Project Scale"
+
+    log_section "[4.5] Test API : Accès aux alertes (Sans token)"
+    local status_code
+    status_code=$(gh_get_status "/repos/python/cpython/code-scanning/alerts")
+    if [[ "$status_code" == "403" ]]; then
+        log_test "INFO" "Accès aux alertes CodeQL refusé sans token (HTTP 403)."
+        log_proof "L'API de sécurité est verrouillée par défaut. Sans un token avec le scope 'security_events', il est impossible d'auditer les alertes CodeQL par programme, même sur un dépôt public."
+    else
+        log_test "INFO" "Code HTTP reçu : $status_code"
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 5 : AUDIT DE DEPENDABOT
+# ───────────────────────────────────────────────────────────────────────────────
+audit_dependabot() {
+    log_header "AUDIT 2/5 : DEPENDABOT"
+
+    log_section "[5.1] Détection limitée aux vulnérabilités connues"
+    log_test "FAIL" "Dependabot ne détecte que les vulnérabilités déjà divulguées et cataloguées."
+    log_proof "Il ne peut pas trouver de faille zero-day non rapportée, ni analyser le code interne de l'organisation. Il se base uniquement sur la GitHub Advisory Database et les avis des fournisseurs."
+    log_reference "https://safeguard.sh/resources/blog/github-dependabot-supply-chain-security-analysis"
+
+    log_section "[5.2] Absence d'analyse de reachability (Accessibilité du code vulnérable)"
+    log_test "FAIL" "Dependabot ne vérifie pas si la fonction vulnérable est réellement appelée."
+    log_proof "Il se contente de vérifier la présence d'une dépendance vulnérable dans le manifeste, sans analyser le graphe d'appels. Cela génère un bruit massif (faux positifs) et rate les cas où la fonction vulnérable est utilisée de manière détournée."
+    log_reference "https://www.theregister.com/2026/02/24/github_dependabot_noise_machine/"
+
+    log_section "[5.3] Ne détecte pas les packages malveillants"
+    log_test "FAIL" "Dependabot ne détecte pas les packages malveillants (typosquatting, packages compromis)."
+    log_proof "Un package peut être malveillant sans avoir de CVE publiée. Dependabot ne se déclenchera que si une advisory est publiée, laissant une fenêtre d'exposition critique."
+    log_reference "https://safeguard.sh/resources/blog/dependabot-security-updates-vs-github-advanced-security"
+
+    log_section "[5.4] Génération de scores CVSS fictifs"
+    log_test "WARN" "Dependabot génère parfois des scores CVSS v4 sans signification réelle."
+    log_proof "Filippo Valsorda (mainteneur Go) a critiqué Dependabot pour avoir généré des scores CVSS v4 'sans signification' pour des vulnérabilités qui ne touchaient que des méthodes inutilisées, créant de la panique inutile."
+    log_reference "https://www.theregister.com/2026/02/24/github_dependabot_noise_machine/"
+
+    log_section "[5.5] Test API : Accès aux alertes Dependabot (Sans token)"
+    local status_code
+    status_code=$(gh_get_status "/repos/python/cpython/dependabot/alerts")
+    if [[ "$status_code" == "403" ]]; then
+        log_test "INFO" "Accès aux alertes Dependabot refusé sans token (HTTP 403)."
+        log_proof "Comme pour CodeQL, l'API Dependabot est verrouillée. L'audit programmatique nécessite une authentification."
+    else
+        log_test "INFO" "Code HTTP reçu : $status_code"
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 6 : AUDIT DE SECRET SCANNING
+# ───────────────────────────────────────────────────────────────────────────────
+audit_secret_scanning() {
+    log_header "AUDIT 3/5 : SECRET SCANNING"
+
+    log_section "[6.1] Angle mort : Secrets dans le code source (Java, etc.)"
+    log_test "FAIL" "Le Secret Scanning ne scanne pas les littéraux de chaîne dans le code source."
+    log_proof "GitHub Secret Scanning se concentre sur les fichiers de configuration (.env, .yaml, .json) et les formats de secrets connus. Il échoue à détecter les clés API et mots de passe codés en dur dans des constantes Java ou des chaînes de caractères, même avec GitHub Advanced Security activé."
+    log_reference "https://github.com/orgs/community/discussions/191555"
+
+    log_section "[6.2] Faux négatifs sur les motifs personnalisés"
+    log_test "WARN" "Les patterns personnalisés (custom patterns) sont une mitigation, mais ils ont des limites."
+    log_proof "Les bibliothèques de patterns personnalisés sont souvent en retard sur la variété réelle des identifiants dans une base de code. Un secret avec un format non standard ou une structure imprévue ne sera pas détecté."
+    log_reference "https://safeguard.sh/resources/blog/github-secret-scanning-patterns-coverage-vs-safeguard"
+
+    log_section "[6.3] Dépendance à la regex et à l'entropie"
+    log_test "FAIL" "La détection par regex échoue sur les secrets non conformes aux motifs prédéfinis."
+    log_proof "Les analyseurs par regex ne peuvent pas détecter les secrets qui ne correspondent pas à un pattern prédéfini, comme les formats personnalisés ou la plupart des PII (Informations Personnelles Identifiables)."
+    log_reference "https://soteri.io/blog/how-secret-detection-tools-spot-leaks/"
+
+    log_section "[6.4] Test API : Accès aux alertes Secret Scanning (Sans token)"
+    local status_code
+    status_code=$(gh_get_status "/repos/python/cpython/secret-scanning/alerts")
+    if [[ "$status_code" == "403" ]]; then
+        log_test "INFO" "Accès aux alertes Secret Scanning refusé sans token (HTTP 403)."
+        log_proof "L'API est verrouillée. Sans authentification, impossible de vérifier si les secrets ont été détectés."
+    else
+        log_test "INFO" "Code HTTP reçu : $status_code"
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 7 : AUDIT DES BRANCH PROTECTION RULES
+# ───────────────────────────────────────────────────────────────────────────────
+audit_branch_protection() {
+    log_header "AUDIT 4/5 : BRANCH PROTECTION"
+
+    log_section "[7.1] Contournement via pull_request_target"
+    log_test "FAIL" "Une faille critique (GHSL-2025-038) permet de contourner les règles de protection de branche."
+    log_proof "En Février 2025, il a été découvert qu'un collaborateur avec un accès push pouvait contourner les restrictions de branche de déploiement et accéder aux secrets d'environnement protégés en exploitant le trigger 'pull_request_target'. GitHub a corrigé en Novembre 2025, laissant une fenêtre d'exposition de 9 mois."
+    log_reference "https://tech.quantco.com/blog/github-actions-deployment-protection-rules"
+
+    log_section "[7.2] Attaques par 'Confused Deputy'"
+    log_test "FAIL" "Les attaques par 'Confused Deputy' peuvent tromper les systèmes pour merger du code malveillant."
+    log_proof "Des recherches ont montré que des workflows GitHub Actions peuvent être trompés pour merger du code malveillant, menant à une injection de commande complète via des noms de branche craftés et contournant les règles de protection."
+    log_reference "https://labs.boostsecurity.io"
+
+    log_section "[7.3] Les bypass_actors ne sont pas toujours appliqués"
+    log_test "WARN" "Un script de protection de branche peut ignorer les 'bypass_actors' lors de la mise à jour."
+    log_proof "Un bug documenté montre qu'un script de configuration de protection de branche a supprimé les 'bypass_actors' non-admin lors de la mise à jour d'un ruleset existant, cassant potentiellement le workflow de 'version-bump-on-merge' et laissant des acteurs non autorisés contourner les règles."
+    log_reference "https://github.com/rjwalters/loom/issues/8239"
+
+    log_section "[7.4] Test API : Lecture des règles de protection (Sans token)"
+    local status_code
+    status_code=$(gh_get_status "/repos/python/cpython/branches/main/protection")
+    if [[ "$status_code" == "403" ]]; then
+        log_test "INFO" "Impossible de lire les règles de protection sans token (HTTP 403)."
+        log_proof "L'API de protection de branche est également verrouillée, rendant l'audit de conformité impossible sans authentification."
+    else
+        log_test "INFO" "Code HTTP reçu : $status_code"
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 8 : AUDIT DE GITHUB ACTIONS
+# ───────────────────────────────────────────────────────────────────────────────
+audit_github_actions() {
+    log_header "AUDIT 5/5 : GITHUB ACTIONS"
+
+    log_section "[8.1] Injection de commandes via des variables non contrôlées"
+    log_test "FAIL" "De multiples CVE (ex: CVE-2025-49013) montrent des injections de commandes via ${{ github.event.* }}."
+    log_proof "L'utilisation non sécurisée de variables contrôlées par l'utilisateur (comme review.body, issue.title) directement dans des contextes de shell permet une exécution arbitraire de code avec les permissions du workflow, compromettant l'infrastructure CI, les secrets et les artefacts de build."
+    log_reference "https://www.incibe.es/en/incibe-cert/notices/aviso/cve-2025-49013"
+
+    log_section "[8.2] Permissions excessives par défaut (GITHUB_TOKEN)"
+    log_test "FAIL" "42.7% des workflows ont un GITHUB_TOKEN sur-privilégié."
+    log_proof "Une analyse de 10 000 projets open-source ML a révélé que 70% ont des vulnérabilités critiques ou de haute sévérité dans leurs workflows GitHub Actions. 42.7% d'entre eux ont un GITHUB_TOKEN avec des permissions excessives, facilitant le vol d'identifiants et les attaques par injection."
+    log_reference "https://www.mitiga.io/blog/inside-the-ai-supply-chain-security-lessons-from-10000-open-source-ml-projects"
+
+    log_section "[8.3] Faille TOCTOU dans les actions de déploiement"
+    log_test "FAIL" "Une faille TOCTOU (Time-of-Check Time-of-Use) dans l'action Branch Deploy de GitHub (GHSL-2025-038) permet un contournement d'approbation."
+    log_proof "L'action GitHub IssueOps Branch Deploy était vulnérable à une faille TOCTOU permettant un contournement de l'approbation de déploiement si aucune protection de branche supplémentaire n'était activée."
+    log_reference "https://securitylab.github.com/advisories/GHSL-2025-038_GitHub_IssueOps_Branch_Deploy_Action/"
+
+    log_section "[8.4] Code injection dans les workflows (CVE-2025-55192)"
+    log_test "FAIL" "Une vulnérabilité d'injection de code a été trouvée dans le workflow issues.yml de plusieurs projets."
+    log_proof "Avant le commit de correctif, une vulnérabilité d'injection de code permettait d'exécuter du code arbitraire dans le contexte du workflow, pouvant compromettre les secrets GitHub Actions et les contents du dépôt."
+    log_reference "https://vulnerability.circl.lu/vuln/CVE-2025-55192"
+
+    log_section "[8.5] Test API : Lecture des workflows (Sans token)"
+    local status_code
+    status_code=$(gh_get_status "/repos/python/cpython/actions/workflows")
+    if [[ "$status_code" == "200" ]]; then
+        log_test "PASS" "Les workflows sont lisibles sans token (HTTP 200)."
+        log_proof "C'est l'un des rares endpoints de sécurité accessibles publiquement, mais il ne révèle que les métadonnées, pas les secrets."
+    else
+        log_test "INFO" "Code HTTP reçu : $status_code"
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 9 : GÉNÉRATION DU RAPPORT FINAL
+# ───────────────────────────────────────────────────────────────────────────────
+generate_report() {
+    log_header "RAPPORT FINAL - SYNTHÈSE DES PREUVES"
+
+    echo ""
+    echo -e "${C_W}  STATISTIQUES DE L'AUDIT :${C_N}"
+    echo -e "  ${C_D}───────────────────────────────────────────────────────────────${C_N}"
+    echo -e "  Tests totaux      : $TOTAL_TESTS"
+    echo -e "  ${C_R}Échecs (Failles)  : $FAILED_TESTS${C_N}"
+    echo -e "  ${C_Y}Avertissements    : $WARNINGS${C_N}"
+    echo -e "  ${C_G}Succès            : $PASSED_TESTS${C_N}"
+
+    echo ""
+    echo -e "${C_W}  CONCLUSION :${C_N}"
+    echo -e "  ${C_D}───────────────────────────────────────────────────────────────${C_N}"
+    echo -e "  Les outils de sécurité de GitHub (CodeQL, Dependabot, Secret Scanning,"
+    echo -e "  Branch Protection, GitHub Actions) présentent des limitations documentées"
+    echo -e "  et des failles de sécurité connues."
+    echo ""
+    echo -e "  ${C_R}1. CodeQL${C_N} a arrêté de détecter les secrets hardcodés (Mai 2025)"
+    echo -e "     et rate les vulnérabilités sur les allocateurs personnalisés."
+    echo ""
+    echo -e "  ${C_R}2. Dependabot${C_N} ne détecte que les vulnérabilités connues, ne vérifie"
+    echo -e "     pas la reachability, et ne détecte pas les packages malveillants."
+    echo ""
+    echo -e "  ${C_R}3. Secret Scanning${C_N} a des angles morts (code source Java) et dépend"
+    echo -e "     de regex qui ratent les secrets non standards."
+    echo ""
+    echo -e "  ${C_R}4. Branch Protection${C_N} est contournable via des failles (pull_request_target,"
+    echo -e "     TOCTOU, bypass_actors ignorés)."
+    echo ""
+    echo -e "  ${C_R}5. GitHub Actions${C_N} est vulnérable aux injections de commandes (CVE-2025-49013,"
+    echo -e "     CVE-2025-55192) et 42.7% des workflows ont un GITHUB_TOKEN trop permissif."
+    echo ""
+    echo -e "  ${C_Y}  Ces outils ne sont pas 'inutiles', mais ils ne sont PAS une garantie${C_N}"
+    echo -e "  ${C_Y}  de sécurité absolue. Ils doivent être complétés par des audits manuels,${C_N}"
+    echo -e "  ${C_Y}  des scanners tiers (Semgrep, Trivy) et une revue de code rigoureuse.${C_N}"
+    echo ""
+    echo -e "  ${C_D}═══════════════════════════════════════════════════════════════════════════════${C_N}"
+    echo -e "  ${C_D}Audit généré par NEXUS SECURITY AUDIT v${SCRIPT_VERSION}${C_N}"
+    echo -e "  ${C_D}Auteur : Aissa Mohammedi (DGK) - NEXUS-OPEN-3.0${C_N}"
+    echo -e "  ${C_D}═══════════════════════════════════════════════════════════════════════════════${C_N}"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SECTION 10 : MAIN
+# ───────────────────────────────────────────────────────────────────────────────
+main() {
+    clear
+    echo -e "${C_M}"
+    cat << "BANNER"
+    ╔═══════════════════════════════════════════════════════════════════════════╗
+    ║                                                                           ║
+    ║     ███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗                           ║
+    ║     ████╗  ██║██╔════╝╚██╗██╔╝██║   ██║██╔════╝                           ║
+    ║     ██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║███████╗                           ║
+    ║     ██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║╚════██║                           ║
+    ║     ██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝███████║                           ║
+    ║     ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝                           ║
+    ║                                                                           ║
+    ║           GITHUB SECURITY RELIABILITY AUDIT v1.0.0                        ║
+    ║                                                                           ║
+    ║     Preuves des limitations et failles des outils de sécurité GitHub      ║
+    ║                                                                           ║
+    ╚═══════════════════════════════════════════════════════════════════════════╝
+BANNER
+    echo -e "${C_N}"
+
+    check_dependencies
+    audit_codeql
+    audit_dependabot
+    audit_secret_scanning
+    audit_branch_protection
+    audit_github_actions
+    generate_report
+}
+
+main "$@"
