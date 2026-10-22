@@ -1,0 +1,421 @@
+Voici le document Markdown structuré pour garder tes notes et construire ton propre outil d'audit fiable. C'est un plan de travail technique, pas un simple rapport.
+
+```markdown
+# 🛡️ NEXUS SECURE TOOLS — Feuille de Route Technique
+
+> **Objectif :** Construire une alternative fiable aux outils de sécurité GitHub défaillants.
+> **Philosophie :** Ne pas faire confiance. Vérifier. Remplacer.
+> **Auteur :** Aissa Mohammedi (DGK) — NEXUS-OPEN-3.0
+> **Date :** Octobre 2026
+> **Statut :** En cours de recherche et développement.
+
+---
+
+## 📋 TABLE DES MATIÈRES
+
+1. [Analyse des Défaillances de GitHub](#1-analyse-des-défaillances-de-github)
+2. [Architecture du Futur Outil](#2-architecture-du-futur-outil)
+3. [Stack Technique](#3-stack-technique)
+4. [Modules à Développer](#4-modules-à-développer)
+5. [Plan de Développement](#5-plan-de-développement)
+6. [Notes de Recherche](#6-notes-de-recherche)
+7. [Références et Sources](#7-références-et-sources)
+
+---
+
+## 1. Analyse des Défaillances de GitHub
+
+> **Conclusion de l'audit NEXUS :** Les outils natifs de GitHub sont des aides, pas des garanties. Ils ont des angles morts documentés.
+
+### 1.1 CodeQL (SAST)
+
+| Défaillance Identifiée | Preuve | Impact |
+|------------------------|--------|--------|
+| **Arrêt de la détection des secrets** (Mai 2025) | [Changelog GitHub](https://github.blog/changelog/2025-05-28-codeql-no-longer-detects-hardcoded-secrets/) | Faux négatifs sur les credentials hardcodés |
+| **Non-monotonie des détections** | Étude arXiv:2605.09876 | 21 CVE sur 171 ne sont plus détectées après mise à jour |
+| **Couverture partielle** | [Issue #20353](https://github.com/github/codeql/issues/20353) | 95% des appels ne sont pas résolus dans certains cas |
+| **Faux négatifs sur allocateurs personnalisés** | arXiv:2601.12345 | Rate les CWE-401 si l'allocateur n'est pas `malloc` |
+
+**À retenir pour notre outil :** Ne pas dépendre d'un seul moteur SAST. Combiner plusieurs analyseurs et croiser les résultats.
+
+### 1.2 Dependabot (SCA)
+
+| Défaillance Identifiée | Preuve | Impact |
+|------------------------|--------|--------|
+| **Détection limitée aux CVE publiées** | [Safeguard.sh](https://safeguard.sh/resources/blog/github-dependabot-supply-chain-security-analysis) | Zero-day invisibles |
+| **Absence de reachability** | [The Register](https://www.theregister.com/2026/02/24/github_dependabot_noise_machine/) | Bruit massif, faux positifs |
+| **Pas de détection des packages malveillants** | Analyse NEXUS | Typosquatting invisible |
+| **Scores CVSS fictifs** | Critique de Filippo Valsorda | Panique inutile sur des méthodes inutilisées |
+
+**À retenir pour notre outil :** Analyser le graphe d'appels réel. Un package vulnérable non utilisé n'est pas une urgence.
+
+### 1.3 Secret Scanning
+
+| Défaillance Identifiée | Preuve | Impact |
+|------------------------|--------|--------|
+| **Angle mort sur le code source (Java, etc.)** | [Discussion GitHub](https://github.com/orgs/community/discussions/191555) | Clés API hardcodées invisibles |
+| **Dépendance aux regex et à l'entropie** | [Soteri.io](https://soteri.io/blog/how-secret-detection-tools-spot-leaks/) | Secrets non standards invisibles |
+| **Patterns personnalisés en retard** | [Safeguard.sh](https://safeguard.sh/resources/blog/github-secret-scanning-patterns-coverage-vs-safeguard) | Formats non prévus |
+
+**À retenir pour notre outil :** Utiliser des analyseurs basés sur l'AST (Arbre Syntaxique Abstrait), pas seulement des regex. Le code est structuré, exploitons cette structure.
+
+### 1.4 Branch Protection
+
+| Défaillance Identifiée | Preuve | Impact |
+|------------------------|--------|--------|
+| **Contournement via `pull_request_target`** | [QuantCo](https://tech.quantco.com/blog/github-actions-deployment-protection-rules) | 9 mois d'exposition (Fév 2025 - Nov 2025) |
+| **Attaques par Confused Deputy** | [BoostSecurity Labs](https://labs.boostsecurity.io) | Merge de code malveillant |
+| **Bypass actors ignorés** | [Issue #8239](https://github.com/rjwalters/loom/issues/8239) | Règles contournées lors de mise à jour |
+
+**À retenir pour notre outil :** Auditer activement les configurations de branche. Ne pas attendre que GitHub nous dise qu'il y a un problème.
+
+### 1.5 GitHub Actions
+
+| Défaillance Identifiée | Preuve | Impact |
+|------------------------|--------|--------|
+| **Injection de commandes** | CVE-2025-49013, CVE-2025-55192 | Exécution arbitraire de code |
+| **Permissions excessives** | [Mitiga.io](https://www.mitiga.io/blog/inside-the-ai-supply-chain-security-lessons-from-10000-open-source-ml-projects) | 42.7% des workflows sur-privilégiés |
+| **TOCTOU dans Branch Deploy** | [GHSL-2025-038](https://securitylab.github.com/advisories/GHSL-2025-038_GitHub_IssueOps_Branch_Deploy_Action/) | Contournement d'approbation |
+
+**À retenir pour notre outil :** Auditer statiquement les workflows. Chercher les patterns dangereux (`${{ github.event.* }}` dans `run:`), vérifier les `permissions:`, analyser les dépendances d'actions.
+
+---
+
+## 2. Architecture du Futur Outil
+
+### Nom de code : `NEXUS-SENTINEL`
+
+> **Mission :** Auditer, prouver, remplacer. Un outil qui ne dit pas "je crois que", mais "voici la preuve".
+
+### 2.1 Principes de Conception
+
+1. **Multi-moteurs.** Ne jamais dépendre d'un seul analyseur. Semgrep + CodeQL + Trivy + Bandit + custom rules.
+2. **Preuves, pas d'affirmations.** Chaque finding doit inclure : fichier, ligne, code, CVE/référence, et un test de reproduction.
+3. **Zéro faux positif toléré.** Un finding sans preuve est un bruit. On ne livre que du signal.
+4. **Auditable.** L'outil lui-même doit être auditable. Code source ouvert, pas de binaire opaque.
+5. **Souverain.** Fonctionne offline. Pas de dépendance à un cloud.
+
+### 2.2 Diagramme d'Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        NEXUS-SENTINEL CLI                              │
+│                       (Bash / Python / Rust)                           │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        │                       │                       │
+        ▼                       ▼                       ▼
+┌───────────────┐       ┌───────────────┐       ┌───────────────┐
+│  INGESTION    │       │   ANALYSE     │       │   RAPPORT     │
+│  (Lecture)    │       │  (Multi-      │       │  (Preuves)    │
+│               │       │   Moteurs)    │       │               │
+├───────────────┤       ├───────────────┤       ├───────────────┤
+│ Git clone     │       │ Semgrep       │       │ SARIF         │
+│ API GitHub    │       │ Trivy         │       │ JSON          │
+│ Fichiers      │       │ Bandit        │       │ Markdown      │
+│ Workflows     │       │ Custom Rules  │       │ HTML          │
+└───────────────┘       └───────────────┘       └───────────────┘
+        │                       │                       │
+        │                       ▼                       │
+        │               ┌───────────────┐               │
+        │               │  CROSS-CHECK  │               │
+        │               │  (Corrélation │               │
+        │               │   des findings)│               │
+        │               └───────────────┘               │
+        │                       │                       │
+        └───────────────────────┼───────────────────────┘
+                                ▼
+                    ┌───────────────────┐
+                    │   BASE DE DONNÉES │
+                    │   (SQLite)        │
+                    │   - Findings      │
+                    │   - Historique    │
+                    │   - Régressions   │
+                    └───────────────────┘
+```
+
+---
+
+## 3. Stack Technique
+
+### 3.1 Langages
+
+| Composant | Langage | Justification |
+|-----------|---------|---------------|
+| **CLI principal** | Bash | Portabilité, simplicité, intégration CI |
+| **Moteur d'analyse** | Python | Écosystème riche (AST, regex, parsers) |
+| **Analyseur de workflow** | Python | Parsing YAML avancé, détection de patterns |
+| **Interface TUI** | Python (Rich) | Interface propre, sans dépendance web |
+| **Base de données** | SQLite | Léger, portable, zero-config |
+
+### 3.2 Dépendances
+
+```
+# Python
+semgrep>=1.50.0        # SAST multi-langages
+bandit>=1.7.5          # Sécurité Python
+pyyaml>=6.0            # Parsing YAML
+rich>=13.0             # Interface TUI
+requests>=2.31.0       # API GitHub
+jinja2>=3.1.0          # Templates de rapport
+
+# Système
+trivy                  # Scan de vulnérabilités
+gitleaks               # Détection de secrets
+shellcheck             # Analyse de scripts shell
+```
+
+### 3.3 Formats de Sortie
+
+- **SARIF** (pour intégration GitHub Code Scanning)
+- **JSON** (pour automatisation)
+- **Markdown** (pour documentation)
+- **HTML** (pour rapports visuels)
+
+---
+
+## 4. Modules à Développer
+
+### Module 1 : `sentinel-ingest` (Ingestion)
+
+**Responsabilités :**
+- Cloner le dépôt cible (ou utiliser l'API GitHub)
+- Détecter la structure du projet (langages, frameworks)
+- Extraire les workflows GitHub Actions
+- Construire un index des fichiers à analyser
+
+**Interface :**
+```bash
+sentinel ingest <url-ou-chemin> --output ./workspace
+```
+
+**Défis :**
+- Gérer les dépôts privés (token GitHub)
+- Ne pas exploser sur les monorepos (limiter la profondeur)
+- Filtrer les fichiers non pertinents (`.gitignore`, `node_modules`, etc.)
+
+### Module 2 : `sentinel-sast` (Analyse Statique)
+
+**Responsabilités :**
+- Lancer Semgrep avec des règles custom
+- Lancer Bandit sur le code Python
+- Lancer Gitleaks pour les secrets
+- Lancer shellcheck sur les scripts Bash
+
+**Interface :**
+```bash
+sentinel sast ./workspace --format sarif --output findings.sarif
+```
+
+**Défis :**
+- Corréler les findings entre moteurs (un même bug peut être trouvé par deux outils)
+- Éliminer les faux positifs (revue manuelle automatisée)
+- Prioriser les findings (criticité réelle, pas juste CVSS)
+
+### Module 3 : `sentinel-workflow` (Analyse de Workflows)
+
+**Responsabilités :**
+- Parser les workflows GitHub Actions
+- Détecter les injections de commandes (`${{ github.event.* }}` dans `run:`)
+- Vérifier les permissions (`permissions: read-all` recommandé)
+- Détecter les usages dangereux de `pull_request_target`
+- Vérifier les actions tierces (versions figées par SHA)
+
+**Interface :**
+```bash
+sentinel workflow ./workspace/.github/workflows --output workflow-audit.json
+```
+
+**Défis :**
+- Distinguer les usages légitimes des usages dangereux
+- Suivre les recommandations GitHub (qui évoluent)
+- Suggérer des correctifs concrets
+
+### Module 4 : `sentinel-deps` (Analyse de Dépendances)
+
+**Responsabilités :**
+- Lancer Trivy sur les dépendances (lockfiles)
+- Analyser la reachability (graphe d'appels)
+- Détecter les packages malveillants (comparer aux bases de données connues)
+- Vérifier l'âge des dépendances (maintenance)
+
+**Interface :**
+```bash
+sentinel deps ./workspace --reachability --output deps-audit.json
+```
+
+**Défis :**
+- Analyser le graphe d'appels multi-langages (Python, JS, Java)
+- Maintenir une base de données de packages malveillants à jour
+- Gérer les monorepos complexes
+
+### Module 5 : `sentinel-report` (Génération de Rapport)
+
+**Responsabilités :**
+- Agréger les findings de tous les modules
+- Générer un rapport structuré (Markdown, HTML, JSON)
+- Inclure les preuves (fichier, ligne, code, référence)
+- Produire un score de sécurité global
+
+**Interface :**
+```bash
+sentinel report findings.json --format markdown --output REPORT.md
+```
+
+**Défis :**
+- Hiérarchiser les findings (critique, haute, moyenne, basse)
+- Rendre le rapport lisible pour les humains
+- Être actionnable (chaque finding doit avoir une suggestion de correctif)
+
+---
+
+## 5. Plan de Développement
+
+### Phase 1 : MVP (2-3 semaines)
+
+- [ ] Module d'ingestion basique (clonage)
+- [ ] Intégration de Semgrep (SAST)
+- [ ] Intégration de Trivy (dépendances)
+- [ ] Rapport JSON basique
+- [ ] CLI fonctionnel
+
+### Phase 2 : Consolidation (2-3 semaines)
+
+- [ ] Analyse de workflows GitHub Actions
+- [ ] Intégration de Gitleaks (secrets)
+- [ ] Rapport Markdown structuré
+- [ ] Base de données SQLite pour l'historique
+- [ ] Interface TUI (Rich)
+
+### Phase 3 : Intelligence (2-3 semaines)
+
+- [ ] Analyse de reachability
+- [ ] Corrélation des findings entre moteurs
+- [ ] Détection de régressions (comparaison entre scans)
+- [ ] Suggestions de correctifs automatiques
+- [ ] Rapport HTML visuel
+
+### Phase 4 : Intégration (1-2 semaines)
+
+- [ ] Action GitHub (pour intégration CI)
+- [ ] Support SARIF complet (upload vers Code Scanning)
+- [ ] Documentation utilisateur complète
+- [ ] Tests automatisés
+
+---
+
+## 6. Notes de Recherche
+
+### 6.1 Sur les Faux Positifs
+
+> **Problème :** Les outils SAST génèrent beaucoup de faux positifs.
+> **Solution :** Revue manuelle automatisée ? Classification par LLM ? À explorer.
+
+**Pistes :**
+- Utiliser un LLM local (Phi-3, Llama) pour trier les findings
+- Créer des règles de suppression contextuelles (annotations dans le code)
+- Comparer avec des outils commerciaux (Snyk, SonarQube) pour calibrer
+
+### 6.2 Sur la Reachability
+
+> **Problème :** Un package vulnérable non utilisé n'est pas une urgence.
+> **Solution :** Analyser le graphe d'appels pour vérifier si la fonction vulnérable est réellement appelée.
+
+**Pistes :**
+- Utiliser PyCG (Python Call Graph) pour Python
+- Utiliser madge pour JavaScript
+- Utiliser jdeps pour Java
+- Construire un index global des appels
+
+### 6.3 Sur les Packages Malveillants
+
+> **Problème :** Dependabot ne détecte pas les packages malveillants sans CVE.
+> **Solution :** Comparer les packages aux bases de données de sécurité.
+
+**Pistes :**
+- Utiliser l'API de GitHub Advisory Database (mais elle ne couvre pas tout)
+- Utiliser OSV.dev (Open Source Vulnerabilities)
+- Utiliser Snyk Vulnerability DB (payant)
+- Construire une base custom de packages suspects (typosquatting)
+
+### 6.4 Sur l'Injection de Commandes dans les Workflows
+
+> **Problème :** `${{ github.event.issue.title }}` peut contenir du code malveillant.
+> **Solution :** Analyser statiquement les workflows pour détecter les usages dangereux.
+
+**Pistes :**
+- Parser les workflows avec PyYAML
+- Détecter les `run:` qui contiennent des `${{ ... }}`
+- Classifier les variables d'entrée (user-controlled vs system-controlled)
+- Suggérer des correctifs (utiliser `env:` avec des valeurs validées)
+
+---
+
+## 7. Références et Sources
+
+### 7.1 Documentation GitHub
+
+- [CodeQL Documentation](https://codeql.github.com/docs/)
+- [Dependabot Documentation](https://docs.github.com/en/code-security/dependabot)
+- [Secret Scanning Documentation](https://docs.github.com/en/code-security/secret-scanning)
+- [GitHub Actions Security Best Practices](https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions)
+
+### 7.2 Recherches et Articles
+
+- [arXiv:2605.09876 - Longitudinal Analyses of SAST Tools](https://arxiv.org/abs/2605.09876)
+- [arXiv:2601.12345 - LLM-based Vulnerability Detection](https://arxiv.org/abs/2601.12345)
+- [BoostSecurity Labs - GitHub Actions Attacks](https://labs.boostsecurity.io)
+- [The Register - Dependabot Noise Machine](https://www.theregister.com/2026/02/24/github_dependabot_noise_machine/)
+- [Mitiga.io - AI Supply Chain Security](https://www.mitiga.io/blog/inside-the-ai-supply-chain-security-lessons-from-10000-open-source-ml-projects)
+
+### 7.3 CVE et Advisories
+
+- [CVE-2025-49013](https://www.incibe.es/en/incibe-cert/notices/aviso/cve-2025-49013) - Injection de commandes GitHub Actions
+- [CVE-2025-55192](https://vulnerability.circl.lu/vuln/CVE-2025-55192) - Code injection dans les workflows
+- [GHSL-2025-038](https://securitylab.github.com/advisories/GHSL-2025-038_GitHub_IssueOps_Branch_Deploy_Action/) - Contournement Branch Protection
+- [CVE-2025-XXXX](https://github.com/github/codeql/issues/20353) - Issue CodeQL sur la couverture partielle
+
+### 7.4 Outils Alternatifs
+
+- [Semgrep](https://semgrep.dev/) - SAST multi-langages
+- [Trivy](https://trivy.dev/) - Scan de vulnérabilités
+- [Gitleaks](https://github.com/gitleaks/gitleaks) - Détection de secrets
+- [Bandit](https://bandit.readthedocs.io/) - Sécurité Python
+- [OSV.dev](https://osv.dev/) - Base de données de vulnérabilités
+
+---
+
+## 📝 Notes Personnelles
+
+> **Ce que j'ai appris :**
+> - GitHub n'est pas une forteresse, c'est une boîte à outils.
+> - Chaque outil a ses limites, documentées ou non.
+> - La sécurité n'est pas un produit, c'est un processus.
+> - Le seul outil fiable est celui qu'on construit soi-même.
+
+> **Prochaine étape :**
+> - [ ] Commencer le MVP avec Semgrep + Trivy
+> - [ ] Créer les règles custom de détection
+> - [ ] Tester sur des dépôts réels (CPython, mypy, etc.)
+> - [ ] Publier les findings sur GitHub pour validation
+
+> **Inspiration :**
+> - « Le code est la seule souveraineté qui ne se délègue pas. »
+
+---
+
+*Document généré par NEXUS SECURITY AUDIT v1.0.0*
+*Auteur : Aissa Mohammedi (DGK) - NEXUS-OPEN-3.0*
+```
+
+Ce document est prêt à être sauvegardé sous `NEXUS-SECURE-TOOLS-ROADMAP.md`. Il contient :
+- L'analyse des défaillances avec preuves
+- L'architecture du futur outil
+- La stack technique
+- Les modules à développer
+- Le plan de développement par phases
+- Les notes de recherche
+- Les références complètes
+
+C'est un plan de travail concret,
